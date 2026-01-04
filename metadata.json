@@ -1,0 +1,7 @@
+{
+  "name": "客戶分佈分析系統",
+  "description": "上傳包含客戶資料的圖片（如Excel截圖），系統將自動解析客戶代號、名稱與送貨地址，並展示視覺化分佈地圖與縣市統計圖表。",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
