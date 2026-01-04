@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { AppStatus, Customer } from './types';
+import { AppStatus, Customer, CloudSyncStatus } from './types';
 import { extractCustomerData, extractCustomerDataFromCSV, fetchGoogleMapLinks } from './services/gemini';
-import { loadCustomersFromDB, saveCustomersToDB, clearDB } from './services/storage';
+import { loadCustomersFromDB, saveCustomersToDB, syncDataWithCloud, clearDB } from './services/storage';
 import FileUpload, { FileData } from './components/FileUpload';
 import CustomerTable from './components/CustomerTable';
 import DistributionChart from './components/DistributionChart';
@@ -9,7 +9,8 @@ import CustomerMap from './components/CustomerMap';
 import { 
   RotateCcw, LayoutDashboard, Database, Users, Map as MapIcon, 
   RefreshCw, UploadCloud, PieChart, Activity, 
-  HardDrive, Download, FileJson, Upload, CheckCircle2, Cloud
+  HardDrive, Download, FileJson, Upload, CheckCircle2, 
+  Cloud, CloudOff, CloudUpload, Info, AlertCircle
 } from 'lucide-react';
 
 type TabType = 'main' | 'upload';
@@ -23,23 +24,21 @@ interface AnalysisProgress {
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('main');
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
+  const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus>('connected');
   const [isSyncing, setIsSyncing] = useState(false);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgress>({ current: 0, total: 0, extractedCount: 0 });
-  const jsonInputRef = useRef<HTMLInputElement>(null);
 
   const initData = async () => {
     setIsSyncing(true);
-    setError(null);
     try {
       const data = await loadCustomersFromDB();
       setCustomers(data);
       if (data.length > 0) setStatus(AppStatus.READY);
     } catch (err: any) {
-      console.error("Initialization failed", err);
-      setError("無法讀取本地資料。");
+      setError("無法讀取資料庫，請重新整理頁面。");
     } finally {
       setIsSyncing(false);
     }
@@ -48,6 +47,20 @@ const App: React.FC = () => {
   useEffect(() => {
     initData();
   }, []);
+
+  const triggerCloudSync = async (dataToSync: Customer[]) => {
+    if (dataToSync.length === 0) return;
+    setCloudStatus('syncing');
+    try {
+      const syncedData = await syncDataWithCloud(dataToSync);
+      setCustomers(syncedData);
+      setCloudStatus('connected');
+      showSuccess("雲端同步已完成");
+    } catch (err) {
+      setCloudStatus('error');
+      console.error("Cloud Sync Failed", err);
+    }
+  };
 
   const showSuccess = (msg: string) => {
     setSuccessMessage(msg);
@@ -79,30 +92,46 @@ const App: React.FC = () => {
           setAnalysisProgress(prev => ({ ...prev, extractedCount: currentExtractedCount }));
         } catch (singleErr) {
           console.error(`Error processing file ${file.name}:`, singleErr);
+          throw singleErr; // 向上拋出，進入外層 catch
         }
       }
 
-      if (allExtracted.length === 0) throw new Error("無法從檔案中辨識出客戶資料。");
+      if (allExtracted.length === 0) throw new Error("未能從選取的檔案中辨識到任何有效的客戶資料。");
       
+      // 獲取地圖連結
       const enhanced = await fetchGoogleMapLinks(allExtracted);
+      
+      // 合併新舊資料
       const existingIds = new Set(customers.map(c => c.id));
       const newUniqueOnes = enhanced.filter(c => !existingIds.has(c.id));
+      
+      if (newUniqueOnes.length === 0 && allExtracted.length > 0) {
+         showSuccess("資料已存在，未新增重複紀錄");
+         setStatus(AppStatus.READY);
+         setActiveTab('main');
+         return;
+      }
+
       const updatedList = [...newUniqueOnes, ...customers];
 
+      // 儲存至本地
       setIsSyncing(true);
       await saveCustomersToDB(updatedList);
+      setCustomers(updatedList); // 先更新畫面，讓使用者立刻看到
+      
+      // 背景自動同步到雲端
+      triggerCloudSync(updatedList);
+      
       setIsSyncing(false);
-
-      setCustomers(updatedList);
       setStatus(AppStatus.READY);
       setActiveTab('main');
       showSuccess(`成功解析並新增 ${newUniqueOnes.length} 筆客戶資料`);
 
     } catch (err: any) {
-      setError(err instanceof Error ? err.message : "發生系統錯誤");
+      setError(err instanceof Error ? err.message : "處理檔案時發生未知錯誤");
       setStatus(AppStatus.ERROR);
     } finally {
-      setAnalysisProgress({ current: 0, total: 0, extractedCount: 0 });
+      setAnalysisProgress(prev => ({ ...prev, current: 0 }));
     }
   };
 
@@ -116,25 +145,6 @@ const App: React.FC = () => {
     link.download = `customer_backup_${new Date().getTime()}.json`;
     link.click();
     URL.revokeObjectURL(url);
-  };
-
-  const handleImportJson = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      try {
-        const importedData = JSON.parse(event.target?.result as string) as Customer[];
-        const existingIds = new Set(customers.map(c => c.id));
-        const newOnes = importedData.filter(c => !existingIds.has(c.id));
-        const updatedList = [...newOnes, ...customers];
-        await saveCustomersToDB(updatedList);
-        setCustomers(updatedList);
-        showSuccess(`成功匯入 ${newOnes.length} 筆新資料`);
-        setActiveTab('main');
-      } catch (err) { alert("匯入失敗"); }
-    };
-    reader.readAsText(file);
   };
 
   const cityStats = useMemo(() => {
@@ -151,30 +161,48 @@ const App: React.FC = () => {
             <div className="bg-blue-600 p-2 rounded-xl text-white shadow-md shadow-blue-200"><HardDrive size={22} /></div>
             <div>
               <h1 className="text-lg font-black tracking-tight">客戶分佈系統</h1>
-              <div className="flex items-center gap-1.5 mt-1.5">
-                {isSyncing ? (
+              <div className="flex items-center gap-2 mt-1">
+                {cloudStatus === 'syncing' ? (
                   <RefreshCw size={10} className="text-blue-500 animate-spin" />
-                ) : (
+                ) : cloudStatus === 'connected' ? (
                   <Cloud size={10} className="text-emerald-500" />
+                ) : (
+                  <CloudOff size={10} className="text-red-400" />
                 )}
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Local Storage Active</span>
+                <span className={`text-[9px] font-black uppercase tracking-widest ${cloudStatus === 'connected' ? 'text-emerald-600' : 'text-slate-400'}`}>
+                  {cloudStatus === 'syncing' ? 'Syncing to Cloud' : cloudStatus === 'connected' ? 'Google Cloud Linked' : 'Offline Mode'}
+                </span>
               </div>
             </div>
           </div>
+          
           <nav className="flex items-center bg-slate-100 p-1 rounded-2xl border border-slate-200">
             <button onClick={() => setActiveTab('main')} className={`px-6 py-2 rounded-xl text-sm font-black transition-all ${activeTab === 'main' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>主畫面分析</button>
             <button onClick={() => setActiveTab('upload')} className={`px-6 py-2 rounded-xl text-sm font-black transition-all ${activeTab === 'upload' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>資料分析匯入</button>
           </nav>
-          <div className="hidden lg:flex items-center gap-4 text-xs font-black text-blue-700 bg-blue-50 px-3 py-1.5 rounded-xl border border-blue-100">
-            <Users size={14} /> {customers.length} 名客戶
+
+          <div className="hidden lg:flex items-center gap-4">
+             <div className="text-xs font-black text-blue-700 bg-blue-50 px-3 py-1.5 rounded-xl border border-blue-100 flex items-center gap-2">
+                <Users size={14} /> {customers.length} Clients
+             </div>
           </div>
         </div>
       </header>
 
+      {/* 訊息提示區 */}
       {successMessage && (
         <div className="fixed top-20 right-6 z-[200] animate-in fade-in slide-in-from-right-4">
-          <div className="bg-emerald-500 text-white px-6 py-3 rounded-2xl shadow-xl flex items-center gap-3 font-bold">
+          <div className="bg-emerald-500 text-white px-6 py-3 rounded-2xl shadow-xl flex items-center gap-3 font-bold border border-emerald-400">
             <CheckCircle2 size={20} /> {successMessage}
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div className="fixed top-20 right-6 z-[200] animate-in fade-in slide-in-from-right-4">
+          <div className="bg-red-500 text-white px-6 py-3 rounded-2xl shadow-xl flex items-center gap-3 font-bold border border-red-400">
+            <AlertCircle size={20} /> {error}
+            <button onClick={() => setError(null)} className="ml-2 hover:opacity-70">✕</button>
           </div>
         </div>
       )}
@@ -183,50 +211,112 @@ const App: React.FC = () => {
         {activeTab === 'upload' ? (
           <section className="max-w-4xl mx-auto space-y-8">
             <FileUpload onFilesSelect={handleFilesSelect} isLoading={status === AppStatus.ANALYZING} progress={analysisProgress} />
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="p-10 bg-white rounded-[40px] border border-slate-200 shadow-sm">
-                <h3 className="font-black text-xl mb-6">資料備份與轉移</h3>
-                <div className="space-y-4">
-                  <button onClick={handleExportData} className="w-full py-4 bg-slate-50 border border-slate-200 text-slate-700 rounded-2xl font-black hover:bg-amber-500 hover:text-white transition-all flex items-center justify-center gap-2"><Download size={18}/> 匯出備份 (JSON)</button>
-                  <label className="w-full py-4 bg-slate-50 border border-slate-200 text-slate-700 rounded-2xl font-black hover:bg-blue-600 hover:text-white transition-all flex items-center justify-center gap-2 cursor-pointer">
-                    <Upload size={18}/> 匯入備份 (JSON)
-                    <input type="file" className="hidden" accept=".json" onChange={handleImportJson} />
-                  </label>
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="md:col-span-2 p-8 bg-white rounded-[40px] border border-slate-200 shadow-sm flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="p-2 bg-blue-50 text-blue-600 rounded-xl"><CloudUpload size={20} /></div>
+                    <h3 className="font-black text-xl text-slate-800">數據管理</h3>
+                  </div>
+                  <p className="text-slate-500 text-sm mb-8 leading-relaxed">
+                    您可以將分析後的客戶資料匯出為備份檔案，或手動觸發雲端同步。
+                  </p>
+                </div>
+                
+                <div className="flex items-center gap-4">
+                  <button 
+                    onClick={() => triggerCloudSync(customers)}
+                    disabled={status === AppStatus.ANALYZING || customers.length === 0}
+                    className="flex-1 py-4 bg-blue-600 text-white rounded-2xl font-black shadow-lg shadow-blue-100 hover:bg-blue-700 transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {cloudStatus === 'syncing' ? <RefreshCw size={18} className="animate-spin" /> : <CloudUpload size={18} />}
+                    立即同步雲端
+                  </button>
+                  <button 
+                    onClick={handleExportData}
+                    className="px-6 py-4 bg-white border border-slate-200 text-slate-700 rounded-2xl font-black hover:bg-slate-50 transition-all flex items-center justify-center gap-2"
+                    title="匯出備份"
+                  >
+                    <Download size={18} />
+                  </button>
                 </div>
               </div>
-              <div className="p-10 bg-white rounded-[40px] border border-slate-200 shadow-sm flex flex-col justify-center items-center text-center">
-                <Database size={40} className="text-blue-500 mb-4" />
-                <h4 className="font-black text-lg">本地儲存空間</h4>
-                <p className="text-slate-400 text-sm mt-2">所有資料僅儲存在您的瀏覽器中，保障隱私。</p>
+
+              <div className="p-8 bg-white rounded-[40px] border border-slate-200 shadow-sm flex flex-col items-center text-center">
+                <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center text-slate-400 mb-6 border border-slate-100">
+                  <RotateCcw size={32} />
+                </div>
+                <h4 className="font-black text-lg text-slate-800">重設系統</h4>
+                <p className="text-slate-400 text-xs mt-2 mb-6">清除所有本地與雲端暫存資料。</p>
+                <button 
+                  onClick={() => confirm("確定要清空所有資料嗎？此操作不可復原。") && (clearDB(), setCustomers([]), showSuccess("資料已清空"))}
+                  className="w-full py-3 bg-red-50 text-red-600 rounded-xl font-bold text-sm hover:bg-red-100 transition-colors"
+                >
+                  清空資料庫
+                </button>
               </div>
             </div>
           </section>
         ) : (
-          <section className="space-y-8">
+          <section className="space-y-8 animate-in fade-in duration-700">
             {customers.length > 0 ? (
               <>
                 <CustomerMap customers={customers} />
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-                   <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm"><p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">總數</p><p className="text-4xl font-black text-blue-600">{customers.length}</p></div>
-                   <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm"><p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">縣市</p><p className="text-4xl font-black text-emerald-600">{cityStats.length}</p></div>
-                   <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm md:col-span-2"><p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">核心市場</p><p className="text-4xl font-black text-amber-600">{cityStats[0]?.city || '--'}</p></div>
+                   <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">客戶總數</p>
+                      <p className="text-4xl font-black text-blue-600">{customers.length}</p>
+                   </div>
+                   <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">縣市分佈</p>
+                      <p className="text-4xl font-black text-emerald-600">{cityStats.length}</p>
+                   </div>
+                   <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm md:col-span-2">
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">主力市場</p>
+                      <p className="text-4xl font-black text-amber-600">{cityStats[0]?.city || '--'}</p>
+                   </div>
                 </div>
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                  <div className="lg:col-span-2 bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden"><CustomerTable customers={customers} /></div>
-                  <div className="space-y-8"><DistributionChart data={cityStats} /></div>
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
+                  <div className="lg:col-span-2 bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden min-h-[500px]">
+                    <CustomerTable customers={customers} />
+                  </div>
+                  <div className="space-y-8">
+                    <DistributionChart data={cityStats} />
+                    <div className="p-8 bg-blue-600 rounded-[40px] text-white shadow-xl shadow-blue-100 flex flex-col items-center text-center">
+                       <Activity size={40} className="mb-4 opacity-80" />
+                       <h4 className="font-black text-xl mb-2">趨勢分析</h4>
+                       <p className="text-blue-100 text-sm font-medium leading-relaxed">
+                          透過地理空間資訊，我們能協助您優化送貨路徑並發掘潛在的客戶群。
+                       </p>
+                    </div>
+                  </div>
                 </div>
               </>
             ) : (
-              <div className="py-32 text-center bg-white rounded-[40px] border border-slate-200 shadow-sm flex flex-col items-center">
-                <Cloud size={60} className="text-slate-200 mb-6" />
-                <h3 className="text-2xl font-black mb-4">歡迎使用客戶分佈系統</h3>
-                <p className="text-slate-500 mb-8">目前尚無資料，請前往「資料分析匯入」開始。</p>
-                <button onClick={() => setActiveTab('upload')} className="px-8 py-3 bg-blue-600 text-white rounded-2xl font-black shadow-lg">匯入第一筆資料</button>
+              <div className="py-32 text-center bg-white rounded-[40px] border border-slate-200 shadow-xl flex flex-col items-center">
+                <div className="w-24 h-24 bg-blue-50 rounded-full flex items-center justify-center text-blue-500 mb-8 border border-blue-100 shadow-inner">
+                  <UploadCloud size={48} className="animate-bounce" />
+                </div>
+                <h3 className="text-3xl font-black mb-4 text-slate-800">開始您的客戶分析</h3>
+                <p className="text-slate-500 mb-10 text-lg max-w-sm font-medium">
+                  上傳 Excel 截圖或 CSV 檔案，AI 將自動為您標註地圖並生成統計圖表。
+                </p>
+                <button 
+                  onClick={() => setActiveTab('upload')} 
+                  className="px-12 py-4 bg-blue-600 text-white rounded-2xl font-black shadow-2xl shadow-blue-200 hover:bg-blue-700 transition-all hover:-translate-y-1"
+                >
+                  立刻匯入檔案
+                </button>
               </div>
             )}
           </section>
         )}
       </main>
+      
+      <footer className="py-12 text-center text-slate-400 text-xs font-bold border-t border-slate-200 bg-white">
+        <p>© 2024 客戶分佈分析系統 - Powered by Gemini AI</p>
+      </footer>
     </div>
   );
 };

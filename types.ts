@@ -7,7 +7,8 @@ export interface Customer {
   lat?: number;
   lng?: number;
   mapUrl?: string;
-  createdAt?: string; // 資料同步至伺服器的時間
+  createdAt?: string; 
+  syncStatus?: 'local' | 'synced' | 'syncing'; // 新增同步狀態
 }
 
 export interface CityStat {
@@ -22,3 +23,5 @@ export enum AppStatus {
   READY = 'READY',
   ERROR = 'ERROR'
 }
+
+export type CloudSyncStatus = 'connected' | 'disconnected' | 'syncing' | 'error';
