@@ -10,7 +10,8 @@ import {
   RotateCcw, LayoutDashboard, Database, Users, Map as MapIcon, 
   RefreshCw, UploadCloud, PieChart, Activity, 
   HardDrive, Download, FileJson, Upload, CheckCircle2, 
-  Cloud, CloudOff, CloudUpload, Info, AlertCircle
+  Cloud, CloudOff, CloudUpload, Info, AlertCircle, Server,
+  ExternalLink, ShieldAlert, X
 } from 'lucide-react';
 
 type TabType = 'main' | 'upload';
@@ -24,21 +25,39 @@ interface AnalysisProgress {
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('main');
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
-  const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus>('connected');
+  const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus>('disconnected');
+  const [dataSource, setDataSource] = useState<'cloud' | 'local'>('local');
   const [isSyncing, setIsSyncing] = useState(false);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [permissionError, setPermissionError] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgress>({ current: 0, total: 0, extractedCount: 0 });
 
   const initData = async () => {
     setIsSyncing(true);
+    setCloudStatus('syncing');
+    setPermissionError(false);
+    
     try {
-      const data = await loadCustomersFromDB();
-      setCustomers(data);
-      if (data.length > 0) setStatus(AppStatus.READY);
+      const result = await loadCustomersFromDB();
+      setCustomers(result.data);
+      setDataSource(result.source);
+      
+      if (result.source === 'cloud') {
+        setCloudStatus('connected');
+        setPermissionError(false);
+      } else {
+        setCloudStatus(result.errorType === 'permission-denied' ? 'error' : 'disconnected');
+        if (result.errorType === 'permission-denied') {
+          setPermissionError(true);
+        }
+      }
+      
+      if (result.data.length > 0) setStatus(AppStatus.READY);
     } catch (err: any) {
-      setError("無法讀取資料庫，請重新整理頁面。");
+      console.error("Init Data Failed:", err);
+      setError("初始化系統時發生錯誤。");
     } finally {
       setIsSyncing(false);
     }
@@ -51,14 +70,21 @@ const App: React.FC = () => {
   const triggerCloudSync = async (dataToSync: Customer[]) => {
     if (dataToSync.length === 0) return;
     setCloudStatus('syncing');
+    setPermissionError(false);
     try {
       const syncedData = await syncDataWithCloud(dataToSync);
       setCustomers(syncedData);
       setCloudStatus('connected');
+      setDataSource('cloud');
       showSuccess("雲端同步已完成");
-    } catch (err) {
+    } catch (err: any) {
       setCloudStatus('error');
-      console.error("Cloud Sync Failed", err);
+      if (err.message === "PERMISSION_DENIED") {
+        setPermissionError(true);
+        setDataSource('local');
+      } else {
+        setError("雲端同步失敗，請檢查網路連線。");
+      }
     }
   };
 
@@ -92,16 +118,13 @@ const App: React.FC = () => {
           setAnalysisProgress(prev => ({ ...prev, extractedCount: currentExtractedCount }));
         } catch (singleErr) {
           console.error(`Error processing file ${file.name}:`, singleErr);
-          throw singleErr; // 向上拋出，進入外層 catch
+          throw singleErr;
         }
       }
 
       if (allExtracted.length === 0) throw new Error("未能從選取的檔案中辨識到任何有效的客戶資料。");
       
-      // 獲取地圖連結
       const enhanced = await fetchGoogleMapLinks(allExtracted);
-      
-      // 合併新舊資料
       const existingIds = new Set(customers.map(c => c.id));
       const newUniqueOnes = enhanced.filter(c => !existingIds.has(c.id));
       
@@ -113,14 +136,13 @@ const App: React.FC = () => {
       }
 
       const updatedList = [...newUniqueOnes, ...customers];
-
-      // 儲存至本地
       setIsSyncing(true);
       await saveCustomersToDB(updatedList);
-      setCustomers(updatedList); // 先更新畫面，讓使用者立刻看到
+      setCustomers(updatedList); 
       
-      // 背景自動同步到雲端
-      triggerCloudSync(updatedList);
+      if (!permissionError) {
+        triggerCloudSync(updatedList);
+      }
       
       setIsSyncing(false);
       setStatus(AppStatus.READY);
@@ -154,7 +176,7 @@ const App: React.FC = () => {
   }, [customers]);
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
+    <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 font-sans">
       <header className="bg-white border-b border-slate-200 sticky top-0 z-[100] shadow-sm">
         <div className="max-w-[1600px] mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -170,7 +192,7 @@ const App: React.FC = () => {
                   <CloudOff size={10} className="text-red-400" />
                 )}
                 <span className={`text-[9px] font-black uppercase tracking-widest ${cloudStatus === 'connected' ? 'text-emerald-600' : 'text-slate-400'}`}>
-                  {cloudStatus === 'syncing' ? 'Syncing to Cloud' : cloudStatus === 'connected' ? 'Google Cloud Linked' : 'Offline Mode'}
+                  {cloudStatus === 'syncing' ? 'Syncing to Cloud' : cloudStatus === 'connected' ? 'Google Cloud Linked' : 'Cloud Error / Local'}
                 </span>
               </div>
             </div>
@@ -182,24 +204,52 @@ const App: React.FC = () => {
           </nav>
 
           <div className="hidden lg:flex items-center gap-4">
-             <div className="text-xs font-black text-blue-700 bg-blue-50 px-3 py-1.5 rounded-xl border border-blue-100 flex items-center gap-2">
+             <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-[10px] font-black uppercase tracking-wider transition-all shadow-sm ${dataSource === 'cloud' ? 'bg-blue-50 border-blue-100 text-blue-700' : 'bg-amber-50 border-amber-100 text-amber-700'}`}>
+                {dataSource === 'cloud' ? <Server size={14} /> : <Database size={14} />}
+                {dataSource === 'cloud' ? '雲端數據模式' : '本地暫存模式'}
+             </div>
+             <div className="text-xs font-black text-slate-700 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 flex items-center gap-2">
                 <Users size={14} /> {customers.length} Clients
              </div>
           </div>
         </div>
+
+        {permissionError && (
+          <div className="bg-amber-500 text-white px-6 py-2 animate-in slide-in-from-top duration-300">
+            <div className="max-w-[1600px] mx-auto flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <ShieldAlert size={18} className="shrink-0" />
+                <div className="text-xs font-bold leading-relaxed">
+                  雲端權限不足 (Permission Denied)：目前僅使用本地模式。請至 Firebase Console 的 <span className="underline">Firestore Rules</span> 將規則設定為 <code className="bg-amber-600 px-1.5 py-0.5 rounded font-mono mx-1">allow read, write: if true;</code>。
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <a 
+                  href="https://console.firebase.google.com/" 
+                  target="_blank" 
+                  className="bg-white text-amber-600 px-4 py-1 rounded-lg text-[10px] font-black hover:bg-amber-50 transition-colors flex items-center gap-1 shrink-0"
+                >
+                  前往設定 <ExternalLink size={10} />
+                </a>
+                <button onClick={() => initData()} className="p-1 hover:bg-amber-600 rounded" title="重新整理連線">
+                  <RefreshCw size={14} />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </header>
 
-      {/* 訊息提示區 */}
       {successMessage && (
-        <div className="fixed top-20 right-6 z-[200] animate-in fade-in slide-in-from-right-4">
+        <div className="fixed top-24 right-6 z-[200] animate-in fade-in slide-in-from-right-4">
           <div className="bg-emerald-500 text-white px-6 py-3 rounded-2xl shadow-xl flex items-center gap-3 font-bold border border-emerald-400">
             <CheckCircle2 size={20} /> {successMessage}
           </div>
         </div>
       )}
 
-      {error && (
-        <div className="fixed top-20 right-6 z-[200] animate-in fade-in slide-in-from-right-4">
+      {error && !permissionError && (
+        <div className="fixed top-24 right-6 z-[200] animate-in fade-in slide-in-from-right-4">
           <div className="bg-red-500 text-white px-6 py-3 rounded-2xl shadow-xl flex items-center gap-3 font-bold border border-red-400">
             <AlertCircle size={20} /> {error}
             <button onClick={() => setError(null)} className="ml-2 hover:opacity-70">✕</button>
@@ -221,6 +271,7 @@ const App: React.FC = () => {
                   </div>
                   <p className="text-slate-500 text-sm mb-8 leading-relaxed">
                     您可以將分析後的客戶資料匯出為備份檔案，或手動觸發雲端同步。
+                    {permissionError && <span className="block mt-2 text-amber-600 font-black">⚠️ 目前雲端同步受阻 (權限錯誤)，資料僅保存在本地。</span>}
                   </p>
                 </div>
                 
@@ -231,7 +282,7 @@ const App: React.FC = () => {
                     className="flex-1 py-4 bg-blue-600 text-white rounded-2xl font-black shadow-lg shadow-blue-100 hover:bg-blue-700 transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2"
                   >
                     {cloudStatus === 'syncing' ? <RefreshCw size={18} className="animate-spin" /> : <CloudUpload size={18} />}
-                    立即同步雲端
+                    同步至雲端
                   </button>
                   <button 
                     onClick={handleExportData}
@@ -250,7 +301,7 @@ const App: React.FC = () => {
                 <h4 className="font-black text-lg text-slate-800">重設系統</h4>
                 <p className="text-slate-400 text-xs mt-2 mb-6">清除所有本地與雲端暫存資料。</p>
                 <button 
-                  onClick={() => confirm("確定要清空所有資料嗎？此操作不可復原。") && (clearDB(), setCustomers([]), showSuccess("資料已清空"))}
+                  onClick={() => confirm("確定要清空所有資料嗎？此操作不可復原。") && (clearDB(), setCustomers([]), setDataSource('local'), setPermissionError(false), showSuccess("資料已清空"))}
                   className="w-full py-3 bg-red-50 text-red-600 rounded-xl font-bold text-sm hover:bg-red-100 transition-colors"
                 >
                   清空資料庫
@@ -260,7 +311,12 @@ const App: React.FC = () => {
           </section>
         ) : (
           <section className="space-y-8 animate-in fade-in duration-700">
-            {customers.length > 0 ? (
+            {isSyncing && customers.length === 0 ? (
+               <div className="py-32 flex flex-col items-center justify-center">
+                  <RefreshCw size={48} className="text-blue-600 animate-spin mb-4" />
+                  <p className="text-slate-500 font-bold">正在連線至雲端資料庫...</p>
+               </div>
+            ) : customers.length > 0 ? (
               <>
                 <CustomerMap customers={customers} />
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">

@@ -1,7 +1,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { Customer } from '../types';
-import { Maximize2, Minimize2, Layers, Map as MapIcon, Globe, Palette } from 'lucide-react';
+import { Maximize2, Minimize2, Layers, Map as MapIcon, Globe, Palette, Users } from 'lucide-react';
 
 interface CustomerMapProps {
   customers: Customer[];
@@ -26,27 +26,13 @@ const TILE_LAYERS: Record<MapLayer, { url: string; attr: string }> = {
 
 const getApproxCoordinates = (city: string) => {
   const coords: Record<string, [number, number]> = {
-    '台北市': [25.0330, 121.5654],
-    '新北市': [25.0117, 121.4658],
-    '桃園市': [24.9936, 121.3010],
-    '台中市': [24.1477, 120.6736],
-    '台南市': [22.9997, 120.2270],
-    '高雄市': [22.6273, 120.3014],
-    '新竹市': [24.8138, 120.9675],
-    '新竹縣': [24.8387, 121.0177],
-    '苗栗縣': [24.5601, 120.8210],
-    '彰化縣': [24.0518, 120.5161],
-    '南投縣': [23.9101, 120.6846],
-    '雲林縣': [23.7092, 120.4313],
-    '嘉義市': [23.4801, 120.4491],
-    '嘉義縣': [23.4518, 120.2559],
-    '屏東縣': [22.6659, 120.4861],
-    '宜蘭縣': [24.7021, 121.7377],
-    '花蓮縣': [23.9871, 121.6016],
-    '台東縣': [22.7583, 121.1444],
-    '澎湖縣': [23.5711, 119.5793],
-    '金門縣': [24.4361, 118.3186],
-    '連江縣': [26.1558, 119.9519],
+    '台北市': [25.0330, 121.5654], '新北市': [25.0117, 121.4658], '桃園市': [24.9936, 121.3010],
+    '台中市': [24.1477, 120.6736], '台南市': [22.9997, 120.2270], '高雄市': [22.6273, 120.3014],
+    '新竹市': [24.8138, 120.9675], '新竹縣': [24.8387, 121.0177], '苗栗縣': [24.5601, 120.8210],
+    '彰化縣': [24.0518, 120.5161], '南投縣': [23.9101, 120.6846], '雲林縣': [23.7092, 120.4313],
+    '嘉義市': [23.4801, 120.4491], '嘉義縣': [23.4518, 120.2559], '屏東縣': [22.6659, 120.4861],
+    '宜蘭縣': [24.7021, 121.7377], '花蓮縣': [23.9871, 121.6016], '台東縣': [22.7583, 121.1444],
+    '澎湖縣': [23.5711, 119.5793], '金門縣': [24.4361, 118.3186], '連江縣': [26.1558, 119.9519],
   };
   return coords[city] || [23.6978, 120.9605];
 };
@@ -57,198 +43,144 @@ const CustomerMap: React.FC<CustomerMapProps> = ({ customers }) => {
   const mapInstance = useRef<any>(null);
   const tileLayerRef = useRef<any>(null);
   const clusterGroup = useRef<any>(null);
+  const resizeObserver = useRef<ResizeObserver | null>(null);
   
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [activeLayer, setActiveLayer] = useState<MapLayer>('grayscale');
   const [showLayerMenu, setShowLayerMenu] = useState(false);
 
   useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
+    const L = (window as any).L;
+    if (!L || !mapRef.current || mapInstance.current) return;
+
+    // 初始化地圖實例
+    mapInstance.current = L.map(mapRef.current, {
+      zoomControl: false,
+      attributionControl: true
+    }).setView([23.8, 121.0], 7);
+    
+    L.control.zoom({ position: 'bottomright' }).addTo(mapInstance.current);
+
+    const config = TILE_LAYERS[activeLayer];
+    tileLayerLayer(config);
+
+    if (L.markerClusterGroup) {
+      clusterGroup.current = L.markerClusterGroup({
+        showCoverageOnHover: false,
+        maxClusterRadius: 50,
+        iconCreateFunction: (cluster: any) => {
+          const count = cluster.getChildCount();
+          let color = 'bg-blue-600';
+          if (count > 50) color = 'bg-red-600';
+          else if (count > 10) color = 'bg-amber-500';
+
+          return L.divIcon({
+            html: `<div class="${color} w-10 h-10 text-white rounded-full flex items-center justify-center font-black shadow-xl border-4 border-white/80 backdrop-blur-sm transition-all hover:scale-110"><span>${count}</span></div>`,
+            className: 'custom-marker-cluster-icon',
+            iconSize: L.point(40, 40)
+          });
+        }
+      });
+      mapInstance.current.addLayer(clusterGroup.current);
+    }
+
+    // 重點：監聽容器大小變化，解決 Tab 切換或匯入後顯示不全的問題
+    resizeObserver.current = new ResizeObserver(() => {
       if (mapInstance.current) {
-        setTimeout(() => mapInstance.current.invalidateSize(), 300);
+        mapInstance.current.invalidateSize();
+      }
+    });
+    if (containerRef.current) {
+      resizeObserver.current.observe(containerRef.current);
+    }
+
+    return () => {
+      if (resizeObserver.current) resizeObserver.current.disconnect();
+      if (mapInstance.current) {
+        mapInstance.current.remove();
+        mapInstance.current = null;
       }
     };
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
-  // Update Tile Layer when activeLayer changes
+  const tileLayerLayer = (config: any) => {
+    const L = (window as any).L;
+    if (tileLayerRef.current) mapInstance.current.removeLayer(tileLayerRef.current);
+    tileLayerRef.current = L.tileLayer(config.url, { attribution: config.attr }).addTo(mapInstance.current);
+  };
+
   useEffect(() => {
-    if (mapInstance.current && (window as any).L) {
-      const L = (window as any).L;
-      if (tileLayerRef.current) {
-        mapInstance.current.removeLayer(tileLayerRef.current);
-      }
-      const config = TILE_LAYERS[activeLayer];
-      tileLayerRef.current = L.tileLayer(config.url, { attribution: config.attr }).addTo(mapInstance.current);
-    }
+    if (mapInstance.current) tileLayerLayer(TILE_LAYERS[activeLayer]);
   }, [activeLayer]);
 
   useEffect(() => {
     const L = (window as any).L;
-    if (!L) return;
+    if (!L || !mapInstance.current || !clusterGroup.current) return;
 
-    if (mapRef.current && !mapInstance.current) {
-      mapInstance.current = L.map(mapRef.current).setView([23.8, 121.0], 7);
-      
-      const config = TILE_LAYERS[activeLayer];
-      tileLayerRef.current = L.tileLayer(config.url, { attribution: config.attr }).addTo(mapInstance.current);
+    clusterGroup.current.clearLayers();
+    const bounds = L.latLngBounds([]);
 
-      if (L.markerClusterGroup) {
-        clusterGroup.current = L.markerClusterGroup({
-          showCoverageOnHover: false,
-          zoomToBoundsOnClick: true,
-          spiderfyOnMaxZoom: true,
-          chunkedLoading: true,
-          polygonOptions: {
-            fillColor: '#3b82f6',
-            color: '#3b82f6',
-            weight: 2,
-            opacity: 1,
-            fillOpacity: 0.1
-          }
-        });
-        mapInstance.current.addLayer(clusterGroup.current);
-      }
-    }
+    customers.forEach((customer) => {
+      const baseCoords = customer.lat && customer.lng ? [customer.lat, customer.lng] : getApproxCoordinates(customer.city);
+      const finalCoords: [number, number] = customer.lat && customer.lng ? (baseCoords as [number, number]) : [baseCoords[0] + (Math.random() - 0.5) * 0.05, baseCoords[1] + (Math.random() - 0.5) * 0.05];
 
-    if (clusterGroup.current && mapInstance.current) {
-      clusterGroup.current.clearLayers();
-      const bounds = L.latLngBounds([]);
+      const marker = L.marker(finalCoords).bindPopup(`
+        <div class="p-2 min-w-[180px]">
+          <h4 class="font-black text-blue-700 text-base mb-1">${customer.name}</h4>
+          <p class="text-xs text-slate-500 font-medium mb-3">${customer.address}</p>
+          ${customer.mapUrl ? `<a href="${customer.mapUrl}" target="_blank" class="block w-full text-center bg-slate-900 text-white py-2 rounded-xl text-[10px] font-black hover:bg-blue-600">導航連結</a>` : ''}
+        </div>
+      `);
+      clusterGroup.current.addLayer(marker);
+      bounds.extend(finalCoords);
+    });
 
-      customers.forEach((customer) => {
-        const coords: [number, number] = customer.lat && customer.lng 
-          ? [customer.lat, customer.lng] 
-          : getApproxCoordinates(customer.city);
-        
-        const finalCoords: [number, number] = customer.lat && customer.lng 
-          ? coords 
-          : [coords[0] + (Math.random() - 0.5) * 0.05, coords[1] + (Math.random() - 0.5) * 0.05];
-
-        const marker = L.marker(finalCoords).bindPopup(`
-          <div class="p-2 min-w-[150px] font-sans">
-            <div class="text-[10px] font-bold text-slate-400 uppercase mb-1 tracking-wider">${customer.id}</div>
-            <h4 class="font-bold text-blue-700 text-base mb-1">${customer.name}</h4>
-            <p class="text-sm text-gray-600 mb-2 leading-tight">${customer.address}</p>
-            ${customer.mapUrl ? `<a href="${customer.mapUrl}" target="_blank" class="block text-center bg-blue-600 text-white px-3 py-1.5 rounded-md text-xs font-semibold hover:bg-blue-700 transition-colors shadow-sm">在 Google Maps 開啟</a>` : ''}
-          </div>
-        `);
-        
-        clusterGroup.current.addLayer(marker);
-        bounds.extend(finalCoords);
-      });
-
-      if (customers.length > 0 && mapInstance.current) {
-        mapInstance.current.fitBounds(bounds, { padding: [50, 50] });
-      }
+    if (customers.length > 0) {
+      mapInstance.current.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
     }
   }, [customers]);
 
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().catch(err => {
-        console.error(`Error attempting to enable full-screen mode: ${err.message}`);
-      });
-    } else {
-      document.exitFullscreen();
-    }
+    if (!document.fullscreenElement) containerRef.current.requestFullscreen();
+    else document.exitFullscreen();
   };
 
   return (
     <div 
       ref={containerRef}
-      className={`w-full bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col transition-all duration-300 ${isFullscreen ? 'h-screen w-screen z-[1000] fixed top-0 left-0 rounded-none' : 'h-[600px] relative'}`}
+      className={`w-full bg-white rounded-[40px] border border-slate-200 shadow-sm overflow-hidden flex flex-col transition-all duration-500 ${isFullscreen ? 'h-screen w-screen z-[1000] fixed top-0 left-0 rounded-none' : 'h-[650px] relative'}`}
     >
-      <div className="p-4 border-b bg-gray-50 flex justify-between items-center z-10">
-        <div className="flex items-center gap-3">
-          <div className="bg-blue-600 p-1.5 rounded-lg text-white">
-            <MapIcon size={18} />
-          </div>
-          <div>
-            <h3 className="font-bold text-gray-800 leading-none">客戶地理分佈分析</h3>
-            <p className="text-[10px] text-gray-400 mt-1 uppercase tracking-widest font-bold">Spatial Distribution</p>
-          </div>
+      <div className="p-5 border-b bg-white flex justify-between items-center z-10">
+        <div className="flex items-center gap-4">
+          <div className="bg-blue-600 p-2.5 rounded-2xl text-white shadow-lg"><MapIcon size={20} /></div>
+          <div><h3 className="font-black text-slate-800 text-lg leading-none">分佈概覽</h3><p className="text-[10px] text-slate-400 mt-1 uppercase font-black tracking-widest">Dynamic Spatial Analysis</p></div>
         </div>
-        
-        <div className="flex items-center gap-2">
-          {/* Layer Selector */}
-          <div className="relative">
-            <button 
-              onClick={() => setShowLayerMenu(!showLayerMenu)}
-              className={`p-2 rounded-lg border flex items-center gap-2 text-sm font-semibold transition-all ${showLayerMenu ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}`}
-            >
-              <Layers size={18} />
-              <span className="hidden sm:inline">底圖切換</span>
+        <div className="flex gap-2">
+          <button onClick={() => setShowLayerMenu(!showLayerMenu)} className="p-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-slate-600 hover:bg-blue-50 hover:text-blue-600 transition-all"><Layers size={18} /></button>
+          <button onClick={toggleFullscreen} className="p-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-slate-600 hover:bg-blue-50 transition-all">{isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}</button>
+        </div>
+      </div>
+
+      <div ref={mapRef} className="flex-1 z-0" />
+
+      {showLayerMenu && (
+        <div className="absolute top-20 right-5 z-20 bg-white p-2 rounded-3xl shadow-2xl border border-slate-100 w-48 animate-in fade-in slide-in-from-top-2">
+          {(['grayscale', 'standard', 'satellite'] as MapLayer[]).map(l => (
+            <button key={l} onClick={() => { setActiveLayer(l); setShowLayerMenu(false); }} className={`w-full text-left px-4 py-3 rounded-2xl text-xs font-black transition-colors ${activeLayer === l ? 'bg-blue-50 text-blue-600' : 'text-slate-500 hover:bg-slate-50'}`}>
+              {l === 'grayscale' ? '極簡灰階' : l === 'standard' ? '標準地圖' : '高清衛星'}
             </button>
-            
-            {showLayerMenu && (
-              <>
-                <div className="fixed inset-0 z-10" onClick={() => setShowLayerMenu(false)}></div>
-                <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-gray-100 z-20 py-2 animate-in fade-in zoom-in duration-200 origin-top-right">
-                  <button 
-                    onClick={() => { setActiveLayer('grayscale'); setShowLayerMenu(false); }}
-                    className={`w-full px-4 py-2.5 text-left text-sm flex items-center gap-3 hover:bg-slate-50 transition-colors ${activeLayer === 'grayscale' ? 'text-blue-600 bg-blue-50 font-bold' : 'text-slate-600'}`}
-                  >
-                    <Palette size={16} /> 簡潔灰階 (最清晰)
-                  </button>
-                  <button 
-                    onClick={() => { setActiveLayer('standard'); setShowLayerMenu(false); }}
-                    className={`w-full px-4 py-2.5 text-left text-sm flex items-center gap-3 hover:bg-slate-50 transition-colors ${activeLayer === 'standard' ? 'text-blue-600 bg-blue-50 font-bold' : 'text-slate-600'}`}
-                  >
-                    <MapIcon size={16} /> 標準地圖
-                  </button>
-                  <button 
-                    onClick={() => { setActiveLayer('satellite'); setShowLayerMenu(false); }}
-                    className={`w-full px-4 py-2.5 text-left text-sm flex items-center gap-3 hover:bg-slate-50 transition-colors ${activeLayer === 'satellite' ? 'text-blue-600 bg-blue-50 font-bold' : 'text-slate-600'}`}
-                  >
-                    <Globe size={16} /> 衛星影像
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-
-          <button 
-            onClick={toggleFullscreen}
-            className="p-2 rounded-lg bg-white border border-gray-200 text-gray-600 hover:text-blue-600 hover:border-blue-200 transition-all shadow-sm flex items-center gap-2 text-sm font-semibold"
-            title={isFullscreen ? "退出全螢幕" : "全螢幕顯示"}
-          >
-            {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
-            <span className="hidden sm:inline">{isFullscreen ? "退出" : "全螢幕"}</span>
-          </button>
-        </div>
-      </div>
-
-      <div ref={mapRef} className="flex-1 bg-slate-100 relative z-0" />
-      
-      {/* Legend overlays */}
-      <div className="absolute bottom-6 left-6 z-10 bg-white/90 backdrop-blur-sm p-3 rounded-xl border border-gray-200 shadow-lg flex flex-col gap-2 pointer-events-none">
-        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest border-b border-gray-100 pb-1 mb-1">密度指標</p>
-        <div className="flex items-center gap-2">
-          <span className="w-3 h-3 rounded-full bg-[#B5E28C] border border-[#6ECC39]"></span>
-          <span className="text-[11px] font-bold text-gray-600">低密度</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="w-3 h-3 rounded-full bg-[#F1D357] border border-[#F0C20C]"></span>
-          <span className="text-[11px] font-bold text-gray-600">中密度</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="w-3 h-3 rounded-full bg-[#FD9C73] border border-[#F18017]"></span>
-          <span className="text-[11px] font-bold text-gray-600">高密度</span>
-        </div>
-      </div>
-
-      {!isFullscreen && (
-        <div className="px-4 py-2 bg-slate-900 text-white text-[10px] flex justify-between items-center tracking-wide">
-          <span className="opacity-70 font-medium">使用提示：灰階模式下數量標示最為顯眼</span>
-          <span className="font-bold flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>
-            動態同步中
-          </span>
+          ))}
         </div>
       )}
+
+      <div className="absolute bottom-8 left-8 z-10 bg-white/90 backdrop-blur-md p-4 rounded-3xl border border-white/50 shadow-xl pointer-events-none">
+        <div className="space-y-2">
+          <div className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-blue-600"></div><span className="text-[10px] font-black text-slate-600">1-10 筆</span></div>
+          <div className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-amber-500"></div><span className="text-[10px] font-black text-slate-600">11-50 筆</span></div>
+          <div className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-red-600"></div><span className="text-[10px] font-black text-slate-600">50+ 筆</span></div>
+        </div>
+      </div>
     </div>
   );
 };
